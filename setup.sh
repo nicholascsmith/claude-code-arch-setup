@@ -349,10 +349,10 @@ create_project() {
     
     # Create environment file
     cat > .env << EOF
-PROJECT_NAME="$PROJECT_NAME"
-GITHUB_REPO="$GITHUB_REPO"
-GITHUB_URL="$GITHUB_URL"
-PROJECT_DESCRIPTION="$PROJECT_DESCRIPTION"
+PROJECT_NAME=$PROJECT_NAME
+GITHUB_REPO=$GITHUB_REPO
+GITHUB_URL=$GITHUB_URL
+PROJECT_DESCRIPTION=$PROJECT_DESCRIPTION
 USER_ID=$(id -u)
 GID=$(id -g)
 EOF
@@ -445,7 +445,7 @@ set -euo pipefail
 
 # Load environment
 if [[ -f .env ]]; then
-    set -a; source .env; set +a
+    export $(grep -v '^#' .env | xargs)
 fi
 
 # Configuration
