@@ -1,0 +1,9 @@
+CLAUDE.md
+.claude/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
