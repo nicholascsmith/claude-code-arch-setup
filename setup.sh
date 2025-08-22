@@ -197,24 +197,29 @@ get_project_details() {
     log_info "GitHub: $GITHUB_REPO"
 }
 
-# Get latest Claude Code version
+# Get latest Claude Code version - try npm first, fallback to latest Docker tag
 get_claude_code_version() {
     log_info "Fetching latest Claude Code version..."
     
-    local version
-    version=$(curl -sf --connect-timeout "$NETWORK_TIMEOUT" \
-        "https://api.github.com/repos/anthropics/claude-code/releases/latest" | \
-        grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' | sed 's/^v//')
+    # Try npm registry first
+    local npm_version
+    npm_version=$(curl -sf --connect-timeout "$NETWORK_TIMEOUT" \
+        "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" | \
+        grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/' 2>/dev/null || true)
     
-    if [[ -z "$version" ]]; then
-        log_error "Failed to fetch latest Claude Code version"
+    if [[ -n "$npm_version" ]]; then
+        CLAUDE_CODE_VERSION="$npm_version"
+        log_success "Using Claude Code version from npm: $CLAUDE_CODE_VERSION"
+        return 0
     fi
     
-    CLAUDE_CODE_VERSION="$version"
+    # Fallback to latest tag if npm fails
+    log_warning "Could not fetch npm version, using 'latest' Docker tag"
+    CLAUDE_CODE_VERSION="latest"
     log_success "Using Claude Code version: $CLAUDE_CODE_VERSION"
 }
 
-# Validate Docker image exists
+# Validate Docker image exists - handle both versioned and latest tags
 validate_docker_image() {
     log_info "Validating Claude Code Docker image..."
     
@@ -227,17 +232,29 @@ validate_docker_image() {
         docker_cmd="sudo docker"
     fi
     
+    # Try the specified version first, then fallback to latest
+    local images_to_try=("ghcr.io/anthropics/claude-code:$CLAUDE_CODE_VERSION")
+    if [[ "$CLAUDE_CODE_VERSION" != "latest" ]]; then
+        images_to_try+=("ghcr.io/anthropics/claude-code:latest")
+    fi
+    
     local retries=0
-    while [[ $retries -lt 3 ]]; do
-        if $docker_cmd manifest inspect "ghcr.io/anthropics/claude-code:$CLAUDE_CODE_VERSION" >/dev/null 2>&1; then
-            log_success "Docker image validated"
-            return 0
-        fi
-        sleep 1
-        ((retries++))
+    for image in "${images_to_try[@]}"; do
+        retries=0
+        while [[ $retries -lt 3 ]]; do
+            if $docker_cmd manifest inspect "$image" >/dev/null 2>&1; then
+                # Update the version to what actually worked
+                CLAUDE_CODE_VERSION="${image##*:}"
+                log_success "Docker image validated: $image"
+                return 0
+            fi
+            sleep 1
+            ((retries++))
+        done
+        log_warning "Docker image $image not found, trying next..."
     done
     
-    log_error "Claude Code Docker image version $CLAUDE_CODE_VERSION not found after retries"
+    log_error "Claude Code Docker image not found after trying all variants"
 }
 
 # Install dependencies
