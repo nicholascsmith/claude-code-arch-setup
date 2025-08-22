@@ -353,7 +353,7 @@ PROJECT_NAME=$PROJECT_NAME
 GITHUB_REPO=$GITHUB_REPO
 GITHUB_URL=$GITHUB_URL
 PROJECT_DESCRIPTION=$PROJECT_DESCRIPTION
-UID=$(id -u)
+USER_ID=$(id -u)
 GID=$(id -g)
 EOF
     chmod 600 .env
@@ -487,8 +487,8 @@ case "${1:-run}" in
     run|start)
         check_github_auth
         log_info "Building and starting Claude Code..."
-        echo "GITHUB_TOKEN=$(gh auth token)" > "$TEMP_DIR/github_token"
-        docker compose --env-file "$TEMP_DIR/github_token" up -d --build claude-code
+        export GITHUB_TOKEN=$(gh auth token)
+        docker compose up --build -d claude-code
         if wait_for_container; then
             docker compose exec claude-code claude --dangerously-skip-permissions
         else
@@ -498,8 +498,8 @@ case "${1:-run}" in
     shell)
         check_github_auth
         log_info "Building and opening shell..."
-        echo "GITHUB_TOKEN=$(gh auth token)" > "$TEMP_DIR/github_token"
-        docker compose --env-file "$TEMP_DIR/github_token" up -d --build claude-code
+        export GITHUB_TOKEN=$(gh auth token)
+        docker compose up --build -d claude-code
         if wait_for_container; then
             docker compose exec claude-code bash
         else
@@ -529,8 +529,8 @@ case "${1:-run}" in
         # Start container if not running
         if ! docker compose ps -q claude-code | grep -q .; then
             log_info "Building and starting container for MCP setup..."
-            echo "GITHUB_TOKEN=$(gh auth token)" > "$TEMP_DIR/github_token"
-            docker compose --env-file "$TEMP_DIR/github_token" up -d --build claude-code
+            export GITHUB_TOKEN=$(gh auth token)
+            docker compose up --build -d claude-code
             if ! wait_for_container; then
                 log_error "Container failed to start"
             fi
@@ -692,8 +692,8 @@ setup_mcp_servers() {
     # Start container if not running
     if ! $docker_cmd compose ps -q claude-code | grep -q .; then
         log_info "Building and starting container for MCP setup..."
-        echo "GITHUB_TOKEN=$(gh auth token)" > "$TEMP_DIR/github_token"
-        $docker_cmd compose --env-file "$TEMP_DIR/github_token" up -d --build claude-code
+        export GITHUB_TOKEN=$(gh auth token)
+        $docker_cmd compose up --build -d claude-code
         
         # Wait for container to be ready
         local retries=0
