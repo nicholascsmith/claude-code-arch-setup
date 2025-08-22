@@ -15,7 +15,6 @@ SCRIPT_VERSION="0.1"
 MIN_DISK_SPACE_MB=1000
 NETWORK_TIMEOUT=15
 DOCKER_WAIT_TIMEOUT=30
-CLAUDE_CODE_VERSION=""  # Will be fetched dynamically
 
 # Colors
 RED='\033[0;31m'
@@ -197,65 +196,7 @@ get_project_details() {
     log_info "GitHub: $GITHUB_REPO"
 }
 
-# Get latest Claude Code version - try npm first, fallback to latest Docker tag
-get_claude_code_version() {
-    log_info "Fetching latest Claude Code version..."
-    
-    # Try npm registry first
-    local npm_version
-    npm_version=$(curl -sf --connect-timeout "$NETWORK_TIMEOUT" \
-        "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" | \
-        grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/' 2>/dev/null || true)
-    
-    if [[ -n "$npm_version" ]]; then
-        CLAUDE_CODE_VERSION="$npm_version"
-        log_success "Using Claude Code version from npm: $CLAUDE_CODE_VERSION"
-        return 0
-    fi
-    
-    # Fallback to latest tag if npm fails
-    log_warning "Could not fetch npm version, using 'latest' Docker tag"
-    CLAUDE_CODE_VERSION="latest"
-    log_success "Using Claude Code version: $CLAUDE_CODE_VERSION"
-}
 
-# Validate Docker image exists - handle both versioned and latest tags
-validate_docker_image() {
-    log_info "Validating Claude Code Docker image..."
-    
-    # Give Docker a moment to fully initialize
-    sleep 2
-    
-    # Use sudo if user not in docker group yet
-    local docker_cmd="docker"
-    if [[ "$NEED_RELOGIN" == "true" ]]; then
-        docker_cmd="sudo docker"
-    fi
-    
-    # Try the specified version first, then fallback to latest
-    local images_to_try=("ghcr.io/anthropics/claude-code:$CLAUDE_CODE_VERSION")
-    if [[ "$CLAUDE_CODE_VERSION" != "latest" ]]; then
-        images_to_try+=("ghcr.io/anthropics/claude-code:latest")
-    fi
-    
-    local retries=0
-    for image in "${images_to_try[@]}"; do
-        retries=0
-        while [[ $retries -lt 3 ]]; do
-            if $docker_cmd manifest inspect "$image" >/dev/null 2>&1; then
-                # Update the version to what actually worked
-                CLAUDE_CODE_VERSION="${image##*:}"
-                log_success "Docker image validated: $image"
-                return 0
-            fi
-            sleep 1
-            ((retries++))
-        done
-        log_warning "Docker image $image not found, trying next..."
-    done
-    
-    log_error "Claude Code Docker image not found after trying all variants"
-}
 
 # Install dependencies
 install_dependencies() {
@@ -271,11 +212,6 @@ install_dependencies() {
     # Setup Docker
     setup_docker
     
-    # Get latest Claude Code version
-    get_claude_code_version
-    
-    # Validate Docker image
-    validate_docker_image
     
     log_success "Dependencies installed"
 }
@@ -422,11 +358,38 @@ GID=$(id -g)
 EOF
     chmod 600 .env
     
+    # Create Dockerfile that builds Claude Code from npm
+    cat > Dockerfile << EOF
+FROM node:20-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \\
+    git \\
+    curl \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code from npm
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Use node user (already exists in base image)
+USER node
+
+# Set up Claude Code directory
+RUN mkdir -p /home/node/.claude
+
+CMD ["claude"]
+EOF
+    
     # Create devcontainer configuration
     cat > .devcontainer/devcontainer.json << EOF
 {
     "name": "Claude Code",
-    "image": "ghcr.io/anthropics/claude-code:$CLAUDE_CODE_VERSION",
+    "build": {
+        "dockerfile": "../Dockerfile"
+    },
     "customizations": {
         "vscode": {
             "extensions": ["ms-vscode.vscode-json"]
@@ -450,7 +413,7 @@ EOF
     cat > docker-compose.yml << EOF
 services:
   claude-code:
-    image: ghcr.io/anthropics/claude-code:$CLAUDE_CODE_VERSION
+    build: .
     container_name: claude-code-$PROJECT_NAME
     stdin_open: true
     tty: true
@@ -467,7 +430,7 @@ services:
     volumes:
       - ./:/workspace
       - claude-code-auth-$PROJECT_NAME:/home/node/.claude
-      - ~/.gitconfig:/home/node/.gitconfig:ro
+      - ~/.gitconfig:/home/claude/.gitconfig:ro
     restart: unless-stopped
 
 volumes:
@@ -523,9 +486,9 @@ check_github_auth() {
 case "${1:-run}" in
     run|start)
         check_github_auth
-        log_info "Starting Claude Code..."
+        log_info "Building and starting Claude Code..."
         echo "GITHUB_TOKEN=$(gh auth token)" > "$TEMP_DIR/github_token"
-        docker compose --env-file "$TEMP_DIR/github_token" up -d claude-code
+        docker compose --env-file "$TEMP_DIR/github_token" up -d --build claude-code
         if wait_for_container; then
             docker compose exec claude-code claude --dangerously-skip-permissions
         else
@@ -534,9 +497,9 @@ case "${1:-run}" in
         ;;
     shell)
         check_github_auth
-        log_info "Opening shell..."
+        log_info "Building and opening shell..."
         echo "GITHUB_TOKEN=$(gh auth token)" > "$TEMP_DIR/github_token"
-        docker compose --env-file "$TEMP_DIR/github_token" up -d claude-code
+        docker compose --env-file "$TEMP_DIR/github_token" up -d --build claude-code
         if wait_for_container; then
             docker compose exec claude-code bash
         else
@@ -555,6 +518,7 @@ case "${1:-run}" in
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             docker compose down -v --remove-orphans
             docker volume prune -f
+            docker image prune -f
             log_success "Cleaned up"
         fi
         ;;
@@ -564,9 +528,9 @@ case "${1:-run}" in
         
         # Start container if not running
         if ! docker compose ps -q claude-code | grep -q .; then
-            log_info "Starting container for MCP setup..."
+            log_info "Building and starting container for MCP setup..."
             echo "GITHUB_TOKEN=$(gh auth token)" > "$TEMP_DIR/github_token"
-            docker compose --env-file "$TEMP_DIR/github_token" up -d claude-code
+            docker compose --env-file "$TEMP_DIR/github_token" up -d --build claude-code
             if ! wait_for_container; then
                 log_error "Container failed to start"
             fi
@@ -727,9 +691,9 @@ setup_mcp_servers() {
     
     # Start container if not running
     if ! $docker_cmd compose ps -q claude-code | grep -q .; then
-        log_info "Starting container for MCP setup..."
+        log_info "Building and starting container for MCP setup..."
         echo "GITHUB_TOKEN=$(gh auth token)" > "$TEMP_DIR/github_token"
-        $docker_cmd compose --env-file "$TEMP_DIR/github_token" up -d claude-code
+        $docker_cmd compose --env-file "$TEMP_DIR/github_token" up -d --build claude-code
         
         # Wait for container to be ready
         local retries=0
